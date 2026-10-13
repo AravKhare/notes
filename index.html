@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#fbfbfc">
+<meta name="apple-mobile-web-app-capable" content="yes"><meta name="mobile-web-app-capable" content="yes">
+<title>Notes</title>
+<style>
+:root{--bg:#fbfbfc;--fg:#16181d;--mut:#8b909a;--line:#e9eaee;--sel:#f0f1f4;--ok:#2f9e6e;--err:#c8423b;color-scheme:light}
+@media(prefers-color-scheme:dark){:root{--bg:#15171b;--fg:#e6e8ec;--mut:#7d828c;--line:#24272d;--sel:#1d2025;--ok:#4cc38a;--err:#e5736d;color-scheme:dark}}
+*{box-sizing:border-box}[hidden]{display:none!important}
+html,body{height:100%;margin:0}
+body{background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left)}
+button{font:inherit;color:inherit;background:none;border:0;cursor:pointer;padding:6px 10px;border-radius:6px}
+button:hover,button:focus-visible{background:var(--sel)}
+input,textarea{font:inherit;color:inherit;background:transparent;border:0;outline:0;width:100%}
+.app{display:grid;grid-template-columns:290px 1fr;height:100%;height:100dvh}
+.side{border-right:1px solid var(--line);display:flex;flex-direction:column;min-height:0}
+.bar{display:flex;align-items:center;justify-content:space-between;padding:8px 10px 8px 16px;min-height:49px;border-bottom:1px solid var(--line)}
+.bar b{font-weight:600;letter-spacing:.01em}
+#st{color:var(--mut);font-size:12px;margin-right:4px}#st.ok::before{content:"";display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--ok);margin-right:6px}#st.bad{color:var(--err)}
+.list{overflow:auto;flex:1}
+.item{padding:11px 16px;cursor:pointer;border-bottom:1px solid var(--line)}
+.item.on{background:var(--sel)}
+.item div{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.item .t{font-weight:600}.item .s{color:var(--mut);font-size:13px}
+.main{display:flex;flex-direction:column;min-height:0}
+#ed{flex:1;resize:none;padding:28px max(20px,calc((100% - 680px)/2));font:18px/1.7 Charter,"Iowa Old Style","Palatino Linotype",Georgia,serif}
+.empty{margin:auto;color:var(--mut)}
+.back{visibility:hidden}
+dialog{background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:10px;max-width:430px;width:calc(100% - 32px);padding:20px}
+dialog::backdrop{background:#0007}
+dialog h3{margin:0 0 8px}
+dialog ol{color:var(--mut);font-size:13px;margin:0 0 14px;padding-left:18px}
+dialog label{font-size:13px;color:var(--mut)}
+dialog input{border:1px solid var(--line);border-radius:6px;padding:9px 10px;margin:4px 0 12px;font-size:16px;color:var(--fg)}
+#err{color:var(--err);font-size:13px;min-height:1em;margin-bottom:8px}
+.row{display:flex;gap:6px;justify-content:flex-end}
+.pri{background:var(--fg);color:var(--bg)}.pri:hover{background:var(--fg);opacity:.85}
+@media(max-width:700px){.app{grid-template-columns:1fr}.main{display:none}.app.open .side{display:none}.app.open .main{display:flex}.back{visibility:visible}#ed{padding:20px}}
+</style></head><body>
+<div class="app" id="app">
+<aside class="side"><div class="bar"><b>Notes</b><span><span id="st"></span><button id="cfg" title="Sync settings">Sync</button><button id="new" title="New note">New</button></span></div><div class="list" id="list"></div></aside>
+<main class="main"><div class="bar"><button class="back" id="back">Back</button><button id="del" title="Delete note">Delete</button></div>
+<textarea id="ed" placeholder="Start writing" hidden></textarea><div class="empty" id="empty">Select a note or create a new one</div></main>
+</div>
+<dialog id="dlg"><h3>Sync with GitHub</h3>
+<ol><li>Create a <b>private</b> repo for your notes (tick "Add a README").</li>
+<li>At github.com/settings/personal-access-tokens/new choose "Only select repositories", pick that repo, and set Contents to Read and write.</li>
+<li>Paste the repo name and token below. The token stays on this device.</li></ol>
+<label>Repo (owner/name)<input id="repo" placeholder="you/notes-data" autocapitalize="off" autocorrect="off" spellcheck="false"></label>
+<label>Token<input id="tok" type="password" placeholder="github_pat_..." autocomplete="off"></label>
+<div id="err"></div>
+<div class="row"><button id="off">Disconnect</button><button id="x">Close</button><button class="pri" id="go">Connect</button></div></dialog>
+<script>
+const $=s=>document.getElementById(s);
+const get=k=>JSON.parse(localStorage.getItem(k)||'null'), put=(k,v)=>localStorage.setItem(k,JSON.stringify(v));
+let cfg=get('cfg')||{}, notes=get('notes')||{}, cur=null, busy=false, timer;
+const save=()=>put('notes',notes);
+const b64=s=>btoa(unescape(encodeURIComponent(s))), unb64=s=>decodeURIComponent(escape(atob(s.replace(/\s/g,''))));
+const status=(t,c)=>{$('st').textContent=t;$('st').className=c||''};
+const title=n=>(n.text.trim().split('\n')[0]||'Untitled').slice(0,60);
+const mk=(text='')=>{const id=Date.now().toString(36)+Math.random().toString(36).slice(2,5);notes[id]={id,text,updated:Date.now(),sha:null,dirty:true};return id};
+
+async function gh(p,o={},soft){
+  const r=await fetch('https://api.github.com/repos/'+cfg.repo+p,{cache:'no-store',...o,headers:{Accept:'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28',Authorization:'Bearer '+cfg.token,...(o.body?{'Content-Type':'application/json'}:{})}});
+  if(r.status===404&&soft)return null;
+  if(!r.ok)throw new Error(r.status+' '+(((await r.json().catch(()=>({}))).message)||'request failed'));
+  return r.json();
+}
+
+async function sync(){
+  if(!cfg.token||busy)return;
+  if(!navigator.onLine)return status('Offline');
+  busy=true;status('Syncing');
+  try{
+    const remote=await gh('/contents/notes',{},true)||[], rm={};
+    remote.forEach(f=>{if(f.name.endsWith('.md'))rm[f.name.slice(0,-3)]=f.sha});
+    for(const id in rm){                       // pull
+      const n=notes[id];
+      if(n&&n.sha===rm[id])continue;
+      if(n&&n.del){n.sha=rm[id];continue}
+      const f=await gh('/contents/notes/'+id+'.md'), text=unb64(f.content);
+      if(n&&n.dirty){mk('(conflict copy) '+text);n.sha=f.sha}   // both sides changed: keep both
+      else notes[id]={id,text,updated:n&&n.text===text?n.updated:Date.now(),sha:f.sha,dirty:false};
+    }
+    for(const id in notes){const n=notes[id];  // removed on another device
+      if(n.sha&&!(id in rm)){if(n.dirty&&!n.del)n.sha=null;else delete notes[id]}}
+    for(const id in notes){const n=notes[id];  // push
+      if(n.del){if(n.sha)await gh('/contents/notes/'+id+'.md',{method:'DELETE',body:JSON.stringify({message:'Delete note',sha:n.sha})},true);delete notes[id];continue}
+      if(!n.dirty||(!n.text.trim()&&!n.sha))continue;
+      const snap=n.text;
+      const r=await gh('/contents/notes/'+id+'.md',{method:'PUT',body:JSON.stringify({message:'Update note',content:b64(snap),...(n.sha?{sha:n.sha}:{})})});
+      n.sha=r.content.sha;n.dirty=n.text!==snap;
+    }
+    if(!notes[cur])cur=null;
+    const n=notes[cur];if(n&&!n.dirty&&$('ed').value!==n.text)$('ed').value=n.text;
+    save();render();status('Synced','ok');
+    if(Object.values(notes).some(n=>n.dirty||n.del))schedule();
+  }catch(e){status(e.message.slice(0,60),'bad')}
+  busy=false;
+}
+function schedule(){clearTimeout(timer);if(cfg.token){status('Saving');timer=setTimeout(sync,2000)}else status('Local only')}
+
+function render(){
+  const ns=Object.values(notes).filter(n=>!n.del).sort((a,b)=>b.updated-a.updated);
+  $('list').replaceChildren(...ns.map(n=>{
+    const d=document.createElement('div'),t=document.createElement('div'),s=document.createElement('div');
+    d.className='item'+(n.id===cur?' on':'');t.className='t';s.className='s';
+    t.textContent=title(n);s.textContent=n.text.trim().split('\n')[1]||new Date(n.updated).toLocaleDateString();
+    d.append(t,s);d.onclick=()=>open(n.id);return d}));
+  const n=notes[cur];
+  $('ed').hidden=!n;$('del').hidden=!n;$('empty').hidden=!!n;$('app').classList.toggle('open',!!n);
+}
+function open(id){
+  const p=notes[cur];if(p&&!p.text.trim()&&!p.sha&&cur!==id)delete notes[cur];
+  cur=id;$('ed').value=notes[id].text;save();render();
+}
+$('new').onclick=()=>{open(mk());$('ed').focus()};
+$('back').onclick=()=>{const p=notes[cur];if(p&&!p.text.trim()&&!p.sha)delete notes[cur];cur=null;render()};
+$('ed').oninput=e=>{const n=notes[cur];n.text=e.target.value;n.updated=Date.now();n.dirty=true;save();render();schedule()};
+$('del').onclick=()=>{if(confirm('Delete this note?')){notes[cur].del=true;cur=null;save();render();schedule()}};
+
+$('cfg').onclick=()=>{$('repo').value=cfg.repo||'';$('tok').value='';$('err').textContent='';$('dlg').showModal()};
+$('x').onclick=()=>$('dlg').close();
+$('go').onclick=async()=>{
+  const old=cfg;cfg={repo:$('repo').value.trim(),token:$('tok').value.trim()||old.token||''};
+  try{
+    const r=await gh('');
+    if(!r.private)throw new Error('This repo is public. Use a private repo so your notes stay private.');
+    put('cfg',cfg);$('dlg').close();sync();
+  }catch(e){cfg=old;$('err').textContent=e.message}
+};
+$('off').onclick=()=>{if(confirm('Disconnect and clear the notes stored on this device? Your repo is not touched.')){localStorage.removeItem('cfg');localStorage.removeItem('notes');cfg={};notes={};cur=null;render();status('Local only');$('dlg').close()}};
+
+document.addEventListener('visibilitychange',()=>{if(!document.hidden)sync()});
+addEventListener('online',sync);
+setInterval(()=>{if(!document.hidden)sync()},60000);
+render();
+if(cfg.token)sync();else{status('Local only');$('cfg').click()}
+</script></body></html>
